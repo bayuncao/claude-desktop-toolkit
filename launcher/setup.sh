@@ -3,31 +3,37 @@
 #
 # 用法:
 #   ./setup.sh                    # 交互式：自动探测代理端口与 Claude 路径，回车确认
-#   ./setup.sh --proxy URL --claude PATH   # 非交互式（适合脚本/CI）
+#   ./setup.sh --proxy URL --claude PATH [--account NAME]   # 非交互式（适合脚本/CI）
 #   ./setup.sh --open             # 组装完立即启动
 #   ./setup.sh --help
 #
 # 产物:
 #   ~/.claude-proxy/proxy.env            配置文件（权限 600，不进仓库）
+#   ~/.claude-accounts/<name>/          可选：账号档案目录（--account 时创建）
+#   ~/.claude-accounts/current          可选：默认账号（--account 时写入）
 #   ~/Applications/Claude (Proxy).app   可双击的启动器
 #
 # 不会修改 /Applications/Claude.app 本体，也不会改动 macOS 系统代理设置。
+# 账号档案的更多管理命令见 ./accounts.sh。
 
 SCRIPT_DIR="${0:A:h}"
 CFG="$HOME/.claude-proxy/proxy.env"
 APP="$HOME/Applications/Claude (Proxy).app"
+ACCOUNTS_DIR="$HOME/.claude-accounts"
 
-PROXY_ARG=""; CLAUDE_ARG=""; DO_OPEN=0
+PROXY_ARG=""; CLAUDE_ARG=""; ACCOUNT_ARG=""; DO_OPEN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --proxy)  PROXY_ARG="$2"; shift 2 ;;
-    --claude) CLAUDE_ARG="$2"; shift 2 ;;
-    --open)   DO_OPEN=1; shift ;;
+    --proxy)   PROXY_ARG="$2"; shift 2 ;;
+    --claude)  CLAUDE_ARG="$2"; shift 2 ;;
+    --account) ACCOUNT_ARG="$2"; shift 2 ;;
+    --open)    DO_OPEN=1; shift ;;
     -h|--help)
-      print -r -- "用法: ./setup.sh [--proxy URL] [--claude PATH] [--open]"
-      print -r -- "  --proxy   代理地址，例如 http://127.0.0.1:7897"
-      print -r -- "  --claude  Claude 可执行文件完整路径"
-      print -r -- "  --open    组装后立即启动"
+      print -r -- "用法: ./setup.sh [--proxy URL] [--claude PATH] [--account NAME] [--open]"
+      print -r -- "  --proxy    代理地址，例如 http://127.0.0.1:7897"
+      print -r -- "  --claude   Claude 可执行文件完整路径"
+      print -r -- "  --account  创建并设为默认账号档案（可选，例如 account1）"
+      print -r -- "  --open     组装后立即启动"
       exit 0 ;;
     *) print -u2 -- "未知参数: $1"; exit 1 ;;
   esac
@@ -83,6 +89,11 @@ if [[ -z "$CLAUDE_ARG" ]]; then
 fi
 [[ -x "$CLAUDE_ARG" ]] || print -u2 -- "警告: $CLAUDE_ARG 当前不可执行（配置仍会写入）。"
 
+if [[ -n "$ACCOUNT_ARG" ]] && [[ ! "$ACCOUNT_ARG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  print -u2 -- "错误: 账号名只能包含字母、数字、点、下划线、连字符。"
+  exit 1
+fi
+
 # ---- 写配置 ----
 mkdir -p "$(dirname "$CFG")" || exit 1
 {
@@ -91,6 +102,15 @@ mkdir -p "$(dirname "$CFG")" || exit 1
 } > "$CFG"
 chmod 600 "$CFG"
 print -r -- "✓ 配置已写入 $CFG"
+
+# ---- 可选：创建默认账号档案 ----
+if [[ -n "$ACCOUNT_ARG" ]]; then
+  mkdir -p "$ACCOUNTS_DIR/$ACCOUNT_ARG" || exit 1
+  chmod 700 "$ACCOUNTS_DIR" "$ACCOUNTS_DIR/$ACCOUNT_ARG" 2>/dev/null
+  print -r -- "$ACCOUNT_ARG" > "$ACCOUNTS_DIR/current" || exit 1
+  chmod 600 "$ACCOUNTS_DIR/current" 2>/dev/null
+  print -r -- "✓ 默认账号已设为 $ACCOUNT_ARG ($ACCOUNTS_DIR/$ACCOUNT_ARG)"
+fi
 
 # ---- 组装 .app ----
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" || exit 1
@@ -115,5 +135,6 @@ print -r -- ""
 print -r -- "启动:   open \"$APP\""
 print -r -- "或:     \"$SCRIPT_DIR/launch\""
 print -r -- "改配置: 编辑 $CFG，或用 CLAUDE_PROXY=... 临时覆盖"
+print -r -- "账号:   ./launcher/accounts.sh list | use <name>；临时切换 CLAUDE_ACCOUNT=<name> ./launch"
 
 [[ "$DO_OPEN" -eq 1 ]] && open "$APP"

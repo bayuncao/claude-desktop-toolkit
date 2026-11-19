@@ -1,17 +1,22 @@
 #!/bin/zsh
-# Claude (Proxy) launcher — 用固定代理启动 Claude Desktop
+# Claude (Proxy) launcher — 固定代理 + 可选独立账号档案
 #
 # 本文件不含任何机器特定的硬编码值。配置来源（优先级从高到低）:
-#   1. 第一个参数（形如 http://host:port）   ./launch http://127.0.0.1:7897
-#   2. 环境变量 CLAUDE_PROXY / CLAUDE_BIN
-#   3. 配置文件 ~/.claude-proxy/proxy.env（由 setup.sh 生成，或手动创建）:
-#        PROXY="http://127.0.0.1:7897"
-#        CLAUDE_BIN="/Applications/Claude.app/Contents/MacOS/Claude"
-#   4. 若 CLAUDE_BIN 未配置，自动探测常见安装位置
+#   代理  1. 第一个 http(s):// 参数         ./launch http://127.0.0.1:7897
+#         2. CLAUDE_PROXY 环境变量
+#         3. ~/.claude-proxy/proxy.env 的 PROXY=
+#   账号  1. 第一个普通参数                 ./launch account2
+#         2. CLAUDE_ACCOUNT 环境变量
+#         3. ~/.claude-accounts/current（由 accounts.sh use 写入）
+#         未配置时沿用 Claude 默认数据目录，兼容原有行为
+#   Claude 路径: CLAUDE_BIN 或 proxy.env 的 CLAUDE_BIN=，未配置则自动探测
 #
-# 未配置代理时直接报错退出：不猜测、不自动扫描、不跟随系统代理。
+# 未配置代理时直接报错退出：不猜测、不扫描、不跟随系统代理。
+# 账号由 --user-data-dir + CLAUDE_USER_DATA_DIR 双重指定，切换前必须完全退出 Claude。
 
 CONFIG_FILE="$HOME/.claude-proxy/proxy.env"
+ACCOUNTS_DIR="$HOME/.claude-accounts"
+CURRENT_FILE="$ACCOUNTS_DIR/current"
 LOG="$HOME/.claude-proxy/launch.log"
 
 # ---- 读取配置（只解析 KEY=VALUE 行，不执行文件内容）----
@@ -26,13 +31,44 @@ if [[ -r "$CONFIG_FILE" ]]; then
   CFG_PROXY="${CFG_PROXY//\"/}"; CFG_BIN="${CFG_BIN//\"/}"
 fi
 
-PROXY="${CLAUDE_PROXY:-$CFG_PROXY}"
-if [[ "${1:-}" == *://* ]]; then PROXY="$1"; shift; fi
+# ---- 解析参数：第一个 URL 当代理，第一个普通词当账号，其余原样透传 ----
+ARG_PROXY=""; ARG_ACCOUNT=""; EXTRA=()
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == *://* && -z "$ARG_PROXY" ]]; then
+    ARG_PROXY="$1"
+  elif [[ "$1" != -* && -z "$ARG_ACCOUNT" ]]; then
+    ARG_ACCOUNT="$1"
+  else
+    EXTRA+=("$1")
+  fi
+  shift
+done
+
+PROXY="${ARG_PROXY:-${CLAUDE_PROXY:-$CFG_PROXY}}"
 if [[ -z "$PROXY" ]]; then
   print -u2 -- "错误: 未配置代理地址。"
   print -u2 -- "运行 ./launcher/setup.sh 生成配置，或创建 $CONFIG_FILE 写入:"
   print -u2 -- '  PROXY="http://127.0.0.1:7897"'
   exit 1
+fi
+
+# ---- 选择账号档案 ----
+ACCOUNT="${ARG_ACCOUNT:-${CLAUDE_ACCOUNT:-}}"
+if [[ -z "$ACCOUNT" && -r "$CURRENT_FILE" ]]; then
+  IFS= read -r ACCOUNT < "$CURRENT_FILE"
+  ACCOUNT="${ACCOUNT//[[:space:]]/}"
+fi
+ACCOUNT_ARGS=()
+if [[ -n "$ACCOUNT" ]]; then
+  if [[ ! "$ACCOUNT" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    print -u2 -- "错误: 账号名只能包含字母、数字、点、下划线、连字符: $ACCOUNT"
+    exit 1
+  fi
+  PROFILE="$ACCOUNTS_DIR/$ACCOUNT"
+  mkdir -p "$PROFILE" || { print -u2 -- "错误: 无法创建档案目录 $PROFILE"; exit 1; }
+  chmod 700 "$PROFILE" 2>/dev/null
+  export CLAUDE_USER_DATA_DIR="$PROFILE"
+  ACCOUNT_ARGS=(--user-data-dir="$PROFILE")
 fi
 
 # ---- 定位 Claude Desktop ----
@@ -57,7 +93,7 @@ fi
 
 # ---- 前置检查（只提示，不阻断）----
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] launch with $PROXY via $CLAUDE_BIN" >> "$LOG" 2>/dev/null
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] launch proxy=$PROXY account=${ACCOUNT:-<default>} via $CLAUDE_BIN" >> "$LOG" 2>/dev/null
 
 host="${PROXY#*://}"; host="${host%%/*}"; host="${host%%:*}"
 port="${PROXY##*:}";  port="${port%%/*}"
@@ -69,7 +105,7 @@ case "$port" in
 esac
 
 if pgrep -f "$CLAUDE_BIN" >/dev/null 2>&1; then
-  print -u2 -- "警告: Claude 已在运行，单实例机制可能忽略本次启动参数（请先 ⌘Q 退出）。"
+  print -u2 -- "警告: Claude 已在运行，单实例机制可能忽略本次启动参数（请先 ⌘Q 完全退出，尤其是切换账号时）。"
 fi
 
 # ---- 环境变量（Code / MCP 等子进程）----
@@ -82,4 +118,5 @@ export no_proxy="$NO_PROXY"
 exec "$CLAUDE_BIN" \
   --proxy-server="$PROXY" \
   --proxy-bypass-list="localhost;127.0.0.1;::1" \
-  "$@"
+  "${ACCOUNT_ARGS[@]}" \
+  "${EXTRA[@]}"
