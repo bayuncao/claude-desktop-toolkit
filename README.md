@@ -1,5 +1,7 @@
 # claude-desktop-toolkit
 
+> [English](README.en.md) | 简体中文
+
 macOS 上维护 Claude Desktop 本地环境的一组小工具：
 
 - **彻底清理**：一键移除本地数据、缓存与设备标识，让应用以全新状态启动
