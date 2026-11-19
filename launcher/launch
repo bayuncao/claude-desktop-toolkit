@@ -1,0 +1,85 @@
+#!/bin/zsh
+# Claude (Proxy) launcher — 用固定代理启动 Claude Desktop
+#
+# 本文件不含任何机器特定的硬编码值。配置来源（优先级从高到低）:
+#   1. 第一个参数（形如 http://host:port）   ./launch http://127.0.0.1:7897
+#   2. 环境变量 CLAUDE_PROXY / CLAUDE_BIN
+#   3. 配置文件 ~/.claude-proxy/proxy.env（由 setup.sh 生成，或手动创建）:
+#        PROXY="http://127.0.0.1:7897"
+#        CLAUDE_BIN="/Applications/Claude.app/Contents/MacOS/Claude"
+#   4. 若 CLAUDE_BIN 未配置，自动探测常见安装位置
+#
+# 未配置代理时直接报错退出：不猜测、不自动扫描、不跟随系统代理。
+
+CONFIG_FILE="$HOME/.claude-proxy/proxy.env"
+LOG="$HOME/.claude-proxy/launch.log"
+
+# ---- 读取配置（只解析 KEY=VALUE 行，不执行文件内容）----
+CFG_PROXY=""; CFG_BIN=""
+if [[ -r "$CONFIG_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      PROXY=*)      CFG_PROXY="${line#PROXY=}" ;;
+      CLAUDE_BIN=*) CFG_BIN="${line#CLAUDE_BIN=}" ;;
+    esac
+  done < "$CONFIG_FILE"
+  CFG_PROXY="${CFG_PROXY//\"/}"; CFG_BIN="${CFG_BIN//\"/}"
+fi
+
+PROXY="${CLAUDE_PROXY:-$CFG_PROXY}"
+if [[ "${1:-}" == *://* ]]; then PROXY="$1"; shift; fi
+if [[ -z "$PROXY" ]]; then
+  print -u2 -- "错误: 未配置代理地址。"
+  print -u2 -- "运行 ./launcher/setup.sh 生成配置，或创建 $CONFIG_FILE 写入:"
+  print -u2 -- '  PROXY="http://127.0.0.1:7897"'
+  exit 1
+fi
+
+# ---- 定位 Claude Desktop ----
+find_claude() {
+  local c
+  for c in "/Applications/Claude.app/Contents/MacOS/Claude" \
+           "$HOME/Applications/Claude.app/Contents/MacOS/Claude"; do
+    [[ -x "$c" ]] && { print -r -- "$c"; return 0; }
+  done
+  if command -v mdfind >/dev/null 2>&1; then
+    c="$(mdfind "kMDItemCFBundleIdentifier == 'com.anthropic.claudefordesktop'" 2>/dev/null | head -1)"
+    [[ -n "$c" && -x "$c/Contents/MacOS/Claude" ]] && { print -r -- "$c/Contents/MacOS/Claude"; return 0; }
+  fi
+  return 1
+}
+CLAUDE_BIN="${CLAUDE_BIN:-$CFG_BIN}"
+[[ -n "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(find_claude)"
+if [[ -z "$CLAUDE_BIN" || ! -x "$CLAUDE_BIN" ]]; then
+  print -u2 -- "错误: 找不到 Claude Desktop 可执行文件。可设置 CLAUDE_BIN 或在 $CONFIG_FILE 中指定。"
+  exit 1
+fi
+
+# ---- 前置检查（只提示，不阻断）----
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] launch with $PROXY via $CLAUDE_BIN" >> "$LOG" 2>/dev/null
+
+host="${PROXY#*://}"; host="${host%%/*}"; host="${host%%:*}"
+port="${PROXY##*:}";  port="${port%%/*}"
+case "$port" in
+  ''|*[!0-9]*) : ;;
+  *) if command -v nc >/dev/null 2>&1 && ! nc -z -G 2 "$host" "$port" 2>/dev/null; then
+       print -u2 -- "警告: 代理 $PROXY 当前不可达；Claude 不会回退直连，启动后将无法联网。"
+     fi ;;
+esac
+
+if pgrep -f "$CLAUDE_BIN" >/dev/null 2>&1; then
+  print -u2 -- "警告: Claude 已在运行，单实例机制可能忽略本次启动参数（请先 ⌘Q 退出）。"
+fi
+
+# ---- 环境变量（Code / MCP 等子进程）----
+export HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" ALL_PROXY="$PROXY"
+export http_proxy="$PROXY" https_proxy="$PROXY" all_proxy="$PROXY"
+export NO_PROXY="localhost,127.0.0.1,::1,.local"
+export no_proxy="$NO_PROXY"
+
+# ---- 启动 ----
+exec "$CLAUDE_BIN" \
+  --proxy-server="$PROXY" \
+  --proxy-bypass-list="localhost;127.0.0.1;::1" \
+  "$@"
