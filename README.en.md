@@ -19,7 +19,7 @@ The original `/Applications/Claude.app` is never modified — its code signature
 | `clean-claude.sh` | Zero-argument cleanup script |
 | `launcher/launch` | Launcher: pinned proxy + optional account profile (reads configuration; no hardcoded values) |
 | `launcher/setup.sh` | One-shot setup: writes the config and assembles a double-clickable `.app` |
-| `launcher/accounts.sh` | Account profile manager: add / switch / import sign-in state / show status |
+| `launcher/accounts.sh` | Account profile manager: add / switch (shows target email, requires confirmation) / import / show status & email |
 | `launcher/Info.plist` | Bundle definition for the wrapper app (generic values; see below) |
 
 The config file `~/.claude-proxy/proxy.env` and the account profiles `~/.claude-accounts/` are created on your machine by the scripts and are **not part of the repo**.
@@ -31,7 +31,7 @@ The config file `~/.claude-proxy/proxy.env` and the account profiles `~/.claude-
 | `clean-claude.sh` | ✅ Yes | No config, no arguments: `./clean-claude.sh` |
 | `launcher/launch` | ❌ Needs one-time setup | Config is external; without `~/.claude-proxy/proxy.env` it exits with a clear error. Run `./launcher/setup.sh` first |
 | `launcher/setup.sh` | ✅ Yes | Generates the config and assembles the `.app` |
-| `launcher/accounts.sh` | ✅ Yes | `list` / `add` / `use` work with no config; profiles are created on demand |
+| `launcher/accounts.sh` | ✅ Yes | `list` / `add` / `status` / `email` work with no config; `use` shows the target email and asks for `Y` before switching |
 
 This is a deliberate trade-off: the repo does not bake in anyone's proxy address or install path, so the launcher needs to be configured once. After that, everyday use is still zero-argument. Git preserves the executable bit (`100755`) on the scripts, so `./` works directly after cloning.
 
@@ -46,7 +46,7 @@ open "$HOME/Applications/Claude (Proxy).app"      # launch with the pinned proxy
 ./clean-claude.sh                                 # run whenever a reset is needed
 ```
 
-For multiple accounts, add one line: `./launcher/accounts.sh use account2` (see section 3).
+For multiple accounts, add one line: `./launcher/accounts.sh use account2` (it shows the target email and asks for `Y`; see section 3).
 
 ## 1. Full reset
 
@@ -101,7 +101,7 @@ Non-interactive usage:
 | Proxy | 3 | Config file | `~/.claude-proxy/proxy.env` |
 | Account | 1 | First plain argument | `./launch account2` |
 | Account | 2 | Environment variable | `CLAUDE_ACCOUNT=account2 ./launch` |
-| Account | 3 | `~/.claude-accounts/current` | written by `accounts.sh use` |
+| Account | 3 | `~/.claude-accounts/current` | written by `accounts.sh use` (asks to confirm the target email) |
 | Claude binary | — | `CLAUDE_BIN` / config file; auto-detected if unset | — |
 
 A proxy URL and an account name can be passed together (in any order); remaining arguments are forwarded to Claude unchanged. **When no account is configured, Claude's default data directory is used**, preserving the original behavior.
@@ -165,20 +165,45 @@ At launch, Electron receives `--user-data-dir=<profile>` and `CLAUDE_USER_DATA_D
 ### Common commands
 
 ```bash
-./launcher/accounts.sh list                    # list profiles, sign-in state, current default (★)
+./launcher/accounts.sh list                    # list profiles, sign-in state, email, current default (★)
 ./launcher/accounts.sh add account3            # create an empty profile (sign in later)
-./launcher/accounts.sh use account3            # make it the default for the next launch
-./launcher/accounts.sh status                  # current account and path
+./launcher/accounts.sh use account3            # switch default: shows target email, requires Y
+./launcher/accounts.sh email account3          # print that profile's sign-in email
+./launcher/accounts.sh status                  # current account, path and email
 ./launcher/accounts.sh path account3           # print the profile's absolute path
 ./launcher/accounts.sh import-current account1 # rescue an account already signed in to the default dir
 ```
+
+The email is read live from `account.email_address` inside the profile's `IndexedDB` using plain shell (no python3), never stored in the repo and requiring no extra config file. `list` / `status` / `email` all show it; an empty profile shows "not detected".
+
+### Switch confirmation
+
+`use` is the only command that rewrites the default account, so every switch first shows the **current → target** emails and waits for confirmation:
+
+```
+About to switch Claude Desktop account profile:
+  current: account3  alice@example.com
+  target:  account2  bob@example.com
+
+Switch to bob@example.com? Enter Y to confirm, anything else cancels:
+```
+
+- Only `Y` / `y` proceeds. `N`, a bare Enter, or anything else cancels **with no side effects** (`current` is not written, no profile directory is created). If a TTY exists but nobody answers, it cancels after 60 seconds instead of hanging forever.
+- **Non-interactive environments** (cron, scripts, called by another program) are **rejected by default**, so a `read` hitting EOF cannot silently pass. When confirmation has already been obtained elsewhere, set the variable explicitly:
+  ```bash
+  ACCOUNTS_CONFIRM=Y ./launcher/accounts.sh use account2
+  ```
+- Switching to the already-current profile returns immediately without asking.
+- Switching to an empty profile (no email) still requires confirmation and honestly says "not detected", preventing an accidental switch to a profile that was never signed in.
+
+> Note: confirmation only covers `accounts.sh use` (day-to-day switching of the default). Two paths skip it: **one-off launches** with an explicit argument such as `./launch account2` / `CLAUDE_ACCOUNT=account2` (they neither ask nor write `current`), and `setup.sh --account` writing the initial default during **first-time setup** (the profile is empty at that point).
 
 ### Correct flow for adding a new account
 
 ```bash
 # ① Fully quit Claude: ⌘Q or right-click the Dock icon → Quit
 #    (closing the window or signing out of the account is NOT enough)
-./launcher/accounts.sh use account3
+./launcher/accounts.sh use account3            # shows the target email, enter Y to confirm
 # ② Launch with the profile
 open "$HOME/Applications/Claude (Proxy).app"     # or ./launcher/launch account3
 # ③ Sign in inside that window — credentials are written to the account3 profile
@@ -221,9 +246,11 @@ From then on, always open that account via the `Claude (Proxy)` launcher (or `./
 | Still the old account after switching / sign-in state overwritten | Usually launched from the original Dock icon, or Claude was not fully quit; use `./launcher/launch <name>` and check `accounts.sh status` |
 | New profile asks you to sign in again | The profile is empty, which is expected; sign in once inside it and the state is saved there |
 | `import-current` says no sign-in state | No `sessionKey` in the default directory; sign in first, then import |
+| `use` says "non-interactive environment cannot read confirmation" | Scripts / cron / programmatic calls never pass silently; run in a terminal and enter `Y`, or set `ACCOUNTS_CONFIRM=Y` when already confirmed |
+| `use` says "email not detected" | The target profile is empty or not signed in yet; you can still enter `Y` to switch there and sign in |
 | App blocked by Gatekeeper | `xattr -cr "$HOME/Applications/Claude (Proxy).app"` |
 | Config change has no effect | Config is read at launch; quit Claude and start it again |
 
 ## Privacy
 
-The repo contains no credentials or machine-specific values: scripts use `$HOME` rather than hardcoded usernames, and the proxy address lives in `~/.claude-proxy/proxy.env`, while account profiles live in `~/.claude-accounts/` — all on your machine, outside the repo (`.gitignore` also excludes same-named directories inside the repo). Account profiles contain sign-in credentials; sharing them publicly may also violate the terms of the services involved. Make sure your usage complies with those terms and your local regulations.
+The repo contains no credentials or machine-specific values: scripts use `$HOME` rather than hardcoded usernames, and the proxy address lives in `~/.claude-proxy/proxy.env`, while account profiles live in `~/.claude-accounts/` — all on your machine, outside the repo (`.gitignore` also excludes same-named directories inside the repo). The email shown during switch confirmation is read live from the local profile's `IndexedDB` at runtime and **never written into the repo** (all documentation examples use placeholder addresses). Account profiles contain sign-in credentials; sharing them publicly may also violate the terms of the services involved. Make sure your usage complies with those terms and your local regulations.
