@@ -19,7 +19,8 @@ macOS 上维护 Claude Desktop 本地环境的一组小工具：
 | `clean-claude.sh` | 零参数清理脚本 |
 | `launcher/launch` | 启动脚本：固定代理 + 可选账号档案（读取配置，不含硬编码值） |
 | `launcher/setup.sh` | 一键生成配置并组装可双击的 `.app` |
-| `launcher/accounts.sh` | 账号档案管理：新增 / 切换（显示目标邮箱并需确认）/ 导入登录态 / 查看状态与邮箱 |
+| `launcher/accounts.sh` | 账号档案管理：新增 / 切换（显示目标邮箱并需确认，成功后自动显示全部档案最新额度）/ 导入登录态 / 查看状态与邮箱 |
+| `launcher/usage.sh` | 用量查询：列出各档案的 5 小时 / 7 天已用比例与重置时间 |
 | `launcher/Info.plist` | wrapper app 的 bundle 定义（通用值，见下方说明） |
 
 配置文件 `~/.claude-proxy/proxy.env`、账号档案 `~/.claude-accounts/` 都由脚本生成在使用者本机，**不进仓库**。
@@ -31,7 +32,8 @@ macOS 上维护 Claude Desktop 本地环境的一组小工具：
 | `clean-claude.sh` | ✅ 可以 | 零配置、零参数：`./clean-claude.sh` |
 | `launcher/launch` | ❌ 需先配置一次 | 配置外置，没有 `~/.claude-proxy/proxy.env` 会明确报错退出；先运行 `./launcher/setup.sh` |
 | `launcher/setup.sh` | ✅ 可以 | 一次性生成配置并组装 `.app` |
-| `launcher/accounts.sh` | ✅ 可以 | 零配置即可 `list` / `add` / `status` / `email`；`use` 切换时会显示目标邮箱并要求输入 `Y` 确认 |
+| `launcher/accounts.sh` | ✅ 可以 | 零配置即可 `list` / `add` / `status` / `email`；`use` 切换时会显示目标邮箱并要求输入 `Y` 确认，切换成功后自动调用同目录 `usage.sh` 显示全部档案最新额度（查询失败不影响切换） |
+| `launcher/usage.sh` | ✅ 可以 | 零配置；需本机已登录过 Claude（Keychain 有密钥）并有 `python3` |
 
 这是刻意的取舍：仓库不写死任何人的代理地址或安装路径，所以启动器需要先配置一次；配置完成后，日常使用仍是零参数。git 会保留脚本的可执行位（mode `100755`），clone 后可直接 `./` 执行。
 
@@ -167,7 +169,7 @@ open "$APP"
 ```bash
 ./launcher/accounts.sh list                    # 列出所有档案、登录态、邮箱、当前默认（★）
 ./launcher/accounts.sh add account3            # 新建空档案（稍后在其中登录）
-./launcher/accounts.sh use account3            # 切换默认账号：显示目标邮箱，输入 Y 后才执行
+./launcher/accounts.sh use account3            # 切换默认账号：显示目标邮箱，输入 Y 后才执行；成功后自动显示全账号额度
 ./launcher/accounts.sh email account3          # 输出该档案的登录邮箱
 ./launcher/accounts.sh status                  # 当前账号、路径与邮箱
 ./launcher/accounts.sh path account3           # 输出档案绝对路径
@@ -224,6 +226,36 @@ open "$HOME/Applications/Claude (Proxy).app"     # 或 ./launcher/launch account
 
 > ⚠️ **档案内含 Cookies 与 OAuth token，等同账号凭据**。绝不要提交到仓库、上传网盘或分享给他人；仓库的 `.gitignore` 已排除 `.claude-accounts/` 一类目录。清理脚本 `clean-claude.sh` 不会删除档案目录。
 
+## 4. 查询各账号用量额度
+
+`launcher/usage.sh` 一次列出所有档案的 **5 小时 / 7 天窗口已用比例、重置时间与倒计时**，用来判断哪个账号还有额度：
+
+```bash
+./launcher/usage.sh                        # 全部档案
+./launcher/usage.sh account2 account4      # 只看指定档案
+./launcher/usage.sh --json                 # 输出 JSON，便于脚本处理
+./launcher/usage.sh --no-proxy             # 直连，不走代理
+./launcher/usage.sh http://127.0.0.1:7890  # 临时指定代理
+```
+
+示例（时间为北京时间 UTC+8，示例邮箱为占位符）：
+
+```
+档案       邮箱                  5小时  重置(北京)  剩余       7天   7天重置      状态
+account2   alice@example.com    100%  11-20 20:40  9分钟      27%  11-24 23:00  已用满
+account3   bob@example.com      100%  11-21 00:00  3小时29分  27%  11-23 00:00  已用满
+account4   carol@example.com    0%    —           —          14%  11-26 16:00  可用(未使用)
+```
+
+**原理**：每个档案的 `config.json` 里有 `oauth:tokenCacheV2`（v10 加密）。脚本用 Keychain 的 `Claude Safe Storage` 密钥在本机解密出 OAuth token，再请求 `https://api.anthropic.com/api/oauth/usage`（头 `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`）。**刻意不走 `claude.ai/api/organizations/.../usage`** —— 那条路径会被 Cloudflare 人机验证挡住，而 `api.anthropic.com` 不受影响。token 只在内存中用，不写文件、不打印、不进仓库。
+
+- 代理优先级：`http(s)://` 参数 > `USAGE_PROXY` / `CLAUDE_PROXY` 环境变量 > `~/.claude-proxy/proxy.env` 的 `PROXY=` > 直连
+- 空档案（未登录、没有 `oauth:tokenCacheV2`）自动跳过；可用 `CLAUDE_ACCOUNTS_DIR` 覆盖档案目录
+- 依赖 `python3` / `openssl` / `curl` / `security`，且 Keychain 里要有 `Claude Safe Storage`（Claude 至少登录过一次）
+- 只读：不修改任何档案、不切换账号、不影响正在运行的 Claude
+
+> ⚠️ **只能拿到「已用百分比 + 重置时间」**，拿不到「还能发多少条消息」的绝对上限 —— Claude 的 5 小时限制按 token 与模型动态计算，官方 API 不提供数值上限。
+
 ## 前提与注意
 
 - macOS + 已安装 Claude Desktop + 一个可用的 `http://` / `https://` 本地代理（Clash / mihomo / Surge 等均可，端口按你的实际配置）
@@ -233,6 +265,7 @@ open "$HOME/Applications/Claude (Proxy).app"     # 或 ./launcher/launch account
 - 不支持 SOCKS URL 与带账号密码的 URL；需要认证时请在本机跑一个转发代理（如 Cntlm / Px）再指向它
 - 账号档案与系统级硬件标识（IOPlatformUUID）无关，Claude 的设备识别主要靠各档案内的本地 ID 文件
 - `launch` 启动时会检查代理端口是否可达并给出警告，但不会阻止启动
+- `usage.sh` 额外依赖 `python3` / `openssl` / `curl` / `security` 与 Keychain 的 `Claude Safe Storage`；它只读档案，不改动任何数据
 
 ## 故障排查
 
@@ -247,9 +280,12 @@ open "$HOME/Applications/Claude (Proxy).app"     # 或 ./launcher/launch account
 | `import-current` 提示没有登录态 | 默认目录里已无 `sessionKey`，需要先登录再导入 |
 | `use` 提示「非交互环境无法读取确认输入」 | 脚本 / cron / 被程序调用时不会静默放行；在终端直接运行输入 `Y`，或已确认时显式设置 `ACCOUNTS_CONFIRM=Y` |
 | `use` 提示「未检测到邮箱」 | 目标档案是空的或尚未登录；确认无误仍可输入 `Y` 切换过去登录 |
+| `usage.sh` 报「无法读取 Keychain 'Claude Safe Storage'」 | Claude 从未在本机登录过，或钥匙串拒绝访问；先在 Claude Desktop 登录一次 |
+| `usage.sh` 某档案显示 `HTTP 401` | 该档案的 OAuth token 已过期；用 `./launcher/launch <name>` 打开一次让它刷新登录态 |
+| `usage.sh` 全部显示「无响应」/ `HTTP 000` | 代理没开或端口不对；试 `--no-proxy` 直连，或临时传 `http://host:port` |
 | app 被 Gatekeeper 拦截 | `xattr -cr "$HOME/Applications/Claude (Proxy).app"` |
 | 改了配置没变化 | 配置在启动时读取，退出 Claude 后重新启动即可 |
 
 ## 隐私
 
-仓库内不含任何凭据或机器特定值：脚本使用 `$HOME`，不硬编码用户名；代理地址在 `~/.claude-proxy/proxy.env`，账号档案在 `~/.claude-accounts/`，都在使用者本机、不在仓库内（`.gitignore` 另排除了仓库内同名目录）。切换确认里显示的邮箱是运行时从本机档案的 `IndexedDB` 现场读取的，**不会写进仓库**（文档示例一律使用占位地址）。账号档案包含登录凭据，公开分享可能同时违反所用服务的条款 —— 请自行确保使用方式符合服务条款与所在地法规。
+仓库内不含任何凭据或机器特定值：脚本使用 `$HOME`，不硬编码用户名；代理地址在 `~/.claude-proxy/proxy.env`，账号档案在 `~/.claude-accounts/`，都在使用者本机、不在仓库内（`.gitignore` 另排除了仓库内同名目录）。切换确认里显示的邮箱是运行时从本机档案的 `IndexedDB` 现场读取的，**不会写进仓库**（文档示例一律使用占位地址）。`usage.sh` 解密出的 OAuth token 只在进程内存里使用，不落盘、不打印、不写日志；输出只含用量百分比与重置时间。账号档案包含登录凭据，公开分享可能同时违反所用服务的条款 —— 请自行确保使用方式符合服务条款与所在地法规。

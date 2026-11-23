@@ -19,7 +19,8 @@ The original `/Applications/Claude.app` is never modified — its code signature
 | `clean-claude.sh` | Zero-argument cleanup script |
 | `launcher/launch` | Launcher: pinned proxy + optional account profile (reads configuration; no hardcoded values) |
 | `launcher/setup.sh` | One-shot setup: writes the config and assembles a double-clickable `.app` |
-| `launcher/accounts.sh` | Account profile manager: add / switch (shows target email, requires confirmation) / import / show status & email |
+| `launcher/accounts.sh` | Account profile manager: add / switch (shows target email, requires confirmation; after switching, automatically shows every profile's latest usage) / import / show status & email |
+| `launcher/usage.sh` | Usage query: 5-hour / 7-day utilisation and reset times for every profile |
 | `launcher/Info.plist` | Bundle definition for the wrapper app (generic values; see below) |
 
 The config file `~/.claude-proxy/proxy.env` and the account profiles `~/.claude-accounts/` are created on your machine by the scripts and are **not part of the repo**.
@@ -31,7 +32,8 @@ The config file `~/.claude-proxy/proxy.env` and the account profiles `~/.claude-
 | `clean-claude.sh` | ✅ Yes | No config, no arguments: `./clean-claude.sh` |
 | `launcher/launch` | ❌ Needs one-time setup | Config is external; without `~/.claude-proxy/proxy.env` it exits with a clear error. Run `./launcher/setup.sh` first |
 | `launcher/setup.sh` | ✅ Yes | Generates the config and assembles the `.app` |
-| `launcher/accounts.sh` | ✅ Yes | `list` / `add` / `status` / `email` work with no config; `use` shows the target email and asks for `Y` before switching |
+| `launcher/accounts.sh` | ✅ Yes | `list` / `add` / `status` / `email` work with no config; `use` shows the target email and asks for `Y` before switching, then automatically calls the sibling `usage.sh` to show every profile's latest usage (a failed lookup does not affect the switch) |
+| `launcher/usage.sh` | ✅ Yes | No config; needs `python3` and a Claude sign-in on this Mac (Keychain key) |
 
 This is a deliberate trade-off: the repo does not bake in anyone's proxy address or install path, so the launcher needs to be configured once. After that, everyday use is still zero-argument. Git preserves the executable bit (`100755`) on the scripts, so `./` works directly after cloning.
 
@@ -167,7 +169,7 @@ At launch, Electron receives `--user-data-dir=<profile>` and `CLAUDE_USER_DATA_D
 ```bash
 ./launcher/accounts.sh list                    # list profiles, sign-in state, email, current default (★)
 ./launcher/accounts.sh add account3            # create an empty profile (sign in later)
-./launcher/accounts.sh use account3            # switch default: shows target email, requires Y
+./launcher/accounts.sh use account3            # switch default: shows target email, requires Y; auto-shows usage after success
 ./launcher/accounts.sh email account3          # print that profile's sign-in email
 ./launcher/accounts.sh status                  # current account, path and email
 ./launcher/accounts.sh path account3           # print the profile's absolute path
@@ -225,6 +227,36 @@ From then on, always open that account via the `Claude (Proxy)` launcher (or `./
 
 > ⚠️ **Profiles contain Cookies and OAuth tokens — they are equivalent to account credentials.** Never commit them, upload them to cloud storage, or share them. The repo's `.gitignore` excludes `.claude-accounts/`-style directories. The cleanup script `clean-claude.sh` does not delete profile directories.
 
+## 4. Usage limits per account
+
+`launcher/usage.sh` lists the **5-hour / 7-day utilisation, reset time and countdown** for every profile, so you can tell which account still has quota:
+
+```bash
+./launcher/usage.sh                        # all profiles
+./launcher/usage.sh account2 account4      # only these profiles
+./launcher/usage.sh --json                 # JSON output for scripting
+./launcher/usage.sh --no-proxy             # direct connection, no proxy
+./launcher/usage.sh http://127.0.0.1:7890  # one-off proxy override
+```
+
+Example (times in UTC+8; placeholder emails):
+
+```
+Profile    Email                 5h     Reset (UTC+8)  Left       7d    7d reset      Status
+account2   alice@example.com     100%   11-20 20:40   9 min      27%   11-24 23:00  Exhausted
+account3   bob@example.com       100%   11-21 00:00   3h29m      27%   11-23 00:00  Exhausted
+account4   carol@example.com     0%     —             —          14%   11-26 16:00  Available
+```
+
+**How it works**: each profile's `config.json` holds `oauth:tokenCacheV2` (v10-encrypted). The script decrypts it locally with the Keychain `Claude Safe Storage` key, then calls `https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer` and `anthropic-beta: oauth-2025-04-20`. It **deliberately avoids `claude.ai/api/organizations/.../usage`**, which is blocked by a Cloudflare challenge, while `api.anthropic.com` is not. The token stays in memory — never written to disk, printed, or committed.
+
+- Proxy precedence: `http(s)://` argument > `USAGE_PROXY` / `CLAUDE_PROXY` env vars > `PROXY=` in `~/.claude-proxy/proxy.env` > direct
+- Empty profiles (never signed in, no `oauth:tokenCacheV2`) are skipped; override the profile root with `CLAUDE_ACCOUNTS_DIR`
+- Requires `python3` / `openssl` / `curl` / `security` and the `Claude Safe Storage` Keychain item (Claude must have been signed in at least once)
+- Read-only: does not modify profiles, switch accounts, or affect a running Claude
+
+> ⚠️ **Only the used percentage and reset time are available** — not an absolute "messages remaining" number. Claude's 5-hour limit is computed dynamically from tokens and models, and the API does not expose a numeric cap.
+
 ## Requirements and caveats
 
 - macOS + Claude Desktop installed + a working `http://` / `https://` local proxy (Clash / mihomo / Surge, etc.; use your own port)
@@ -234,6 +266,7 @@ From then on, always open that account via the `Claude (Proxy)` launcher (or `./
 - SOCKS URLs and URLs with embedded credentials are not supported; if your proxy requires authentication, run a local forwarding proxy (e.g. Cntlm / Px) and point to that instead
 - Account profiles are unrelated to system-level hardware identifiers (IOPlatformUUID); Claude's device recognition relies mainly on the local ID files inside each profile
 - At startup, `launch` warns if the proxy port is unreachable, but does not block the launch
+- `usage.sh` additionally needs `python3` / `openssl` / `curl` / `security` and the `Claude Safe Storage` Keychain item; it only reads profiles and changes nothing
 
 ## Troubleshooting
 
@@ -248,9 +281,12 @@ From then on, always open that account via the `Claude (Proxy)` launcher (or `./
 | `import-current` says no sign-in state | No `sessionKey` in the default directory; sign in first, then import |
 | `use` says "non-interactive environment cannot read confirmation" | Scripts / cron / programmatic calls never pass silently; run in a terminal and enter `Y`, or set `ACCOUNTS_CONFIRM=Y` when already confirmed |
 | `use` says "email not detected" | The target profile is empty or not signed in yet; you can still enter `Y` to switch there and sign in |
+| `usage.sh`: "cannot read Keychain 'Claude Safe Storage'" | Claude has never been signed in on this Mac, or Keychain access was denied; sign in once in Claude Desktop |
+| `usage.sh`: one profile shows `HTTP 401` | That profile's OAuth token expired; open it once with `./launcher/launch <name>` to refresh the sign-in |
+| `usage.sh`: everything shows "no response" / `HTTP 000` | Proxy is down or the port is wrong; try `--no-proxy`, or pass `http://host:port` |
 | App blocked by Gatekeeper | `xattr -cr "$HOME/Applications/Claude (Proxy).app"` |
 | Config change has no effect | Config is read at launch; quit Claude and start it again |
 
 ## Privacy
 
-The repo contains no credentials or machine-specific values: scripts use `$HOME` rather than hardcoded usernames, and the proxy address lives in `~/.claude-proxy/proxy.env`, while account profiles live in `~/.claude-accounts/` — all on your machine, outside the repo (`.gitignore` also excludes same-named directories inside the repo). The email shown during switch confirmation is read live from the local profile's `IndexedDB` at runtime and **never written into the repo** (all documentation examples use placeholder addresses). Account profiles contain sign-in credentials; sharing them publicly may also violate the terms of the services involved. Make sure your usage complies with those terms and your local regulations.
+The repo contains no credentials or machine-specific values: scripts use `$HOME` rather than hardcoded usernames, and the proxy address lives in `~/.claude-proxy/proxy.env`, while account profiles live in `~/.claude-accounts/` — all on your machine, outside the repo (`.gitignore` also excludes same-named directories inside the repo). The email shown during switch confirmation is read live from the local profile's `IndexedDB` at runtime and **never written into the repo** (all documentation examples use placeholder addresses). The OAuth token decrypted by `usage.sh` stays in process memory — never written to disk, printed, or logged; its output contains only utilisation percentages and reset times. Account profiles contain sign-in credentials; sharing them publicly may also violate the terms of the services involved. Make sure your usage complies with those terms and your local regulations.

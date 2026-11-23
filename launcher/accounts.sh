@@ -6,7 +6,8 @@
 #
 # 用法:
 #   ./accounts.sh list                    列出所有档案及状态（含登录邮箱）
-#   ./accounts.sh use <name>              切换默认账号：显示目标邮箱，输入 Y 后才执行
+#   ./accounts.sh use <name>              切换默认账号：显示目标邮箱，输入 Y 后才执行；
+#                                         成功后自动显示全部档案最新额度（同目录 usage.sh）
 #   ./accounts.sh add <name>              新建空档案（稍后在其中登录）
 #   ./accounts.sh email <name>            输出该档案的登录邮箱
 #   ./accounts.sh import-current <name>  把「当前默认目录的登录态」导入指定档案
@@ -213,6 +214,23 @@ case "$CMD" in
     chmod 600 "$CURRENT" 2>/dev/null
     print -r -- "✓ 默认账号已设为 $NAME（${target_mail:-未检测到邮箱}）→ $ROOT/$NAME"
     has_login "$NAME" && print -r -- "  该档案已有登录态，可直接启动" || print -r -- "  该档案是空的，启动后需要登录一次"
+    # 切换成功后自动显示全部档案的最新额度（usage.sh 只读，不产生副作用；
+    # 查询失败不影响切换结果，仅提示手动执行）
+    SCRIPT_DIR="${0:A:h}"
+    if [[ -x "$SCRIPT_DIR/usage.sh" ]]; then
+      print -r -- ""
+      print -r -- "=== 全部账号最新额度 ==="
+      out="$(CLAUDE_ACCOUNTS_DIR="$ROOT" "$SCRIPT_DIR/usage.sh" 2>&1)"
+      if print -r -- "$out" | grep -q 'HTTP 000'; then
+        out="$(CLAUDE_ACCOUNTS_DIR="$ROOT" "$SCRIPT_DIR/usage.sh" 2>&1)"
+      fi
+      if print -r -- "$out" | grep -q 'HTTP 000'; then
+        print -r -- "$out"
+        print -r -- "（部分档案查询失败，可稍后手动执行: $SCRIPT_DIR/usage.sh）"
+      else
+        print -r -- "$out"
+      fi
+    fi
     ;;
 
   import-current)
