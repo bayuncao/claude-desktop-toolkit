@@ -44,26 +44,50 @@ has_login() {
   strings "$ROOT/$1/Cookies" 2>/dev/null | grep -q 'sessionKey'
 }
 
-# 读取档案里的登录邮箱（account.email_address，明文存于 claude.ai 的 IndexedDB）。
-# 纯 shell：strings 把二进制转成可打印行 → 优先定位 email_address 字段 →
-# 退化到「出现次数最多的邮箱」。不依赖 python3 / sqlite3。
-# 空档案或读不到时返回非 0 且无输出。
+# 扫描指定目录，输出出现频次最高的邮箱（已解码 %40、已排除占位域名）。
+# 用 find + xargs 分批喂给 cat，避免档案里上万个缓存文件撑爆 ARG_MAX。
+_mail_scan() {
+  local d
+  for d in "$@"; do
+    [[ -d "$d" ]] || continue
+    find "$d" -type f -size -8M -print0 2>/dev/null | xargs -0 -r cat 2>/dev/null
+  done \
+    | strings -a 2>/dev/null \
+    | sed 's/%40/@/g' \
+    | grep -aoE '[A-Za-z0-9][A-Za-z0-9._%+-]{2,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}' \
+    | grep -viE '@(example\.(com|org|net)|anthropic\.(com|ai)|claude\.ai|sentry\.io|google\.com|gstatic\.com|w3\.org|schema\.org)$' \
+    | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
+}
+
+# 只取紧跟在 email= / email_address 标记后的地址：命中率最高、噪声最小。
+_mail_marked() {
+  local d
+  for d in "$@"; do
+    [[ -d "$d" ]] || continue
+    find "$d" -type f -size -8M -print0 2>/dev/null | xargs -0 -r cat 2>/dev/null
+  done \
+    | strings -a 2>/dev/null \
+    | sed 's/%40/@/g' \
+    | grep -aoiE '(email_address|emailaddress|\bemail)[^A-Za-z0-9]{0,4}[A-Za-z0-9._%+-]{2,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}' \
+    | grep -aoiE '[A-Za-z0-9._%+-]{2,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}' \
+    | grep -viE '@(example\.(com|org|net)|anthropic\.(com|ai)|claude\.ai|sentry\.io|google\.com|gstatic\.com|w3\.org|schema\.org)$' \
+    | head -1
+}
+
+# 读取档案里的登录邮箱。
+# 依据：claude.ai 的账号记录含 account.email_address。该值在 LevelDB 里可能被分块压缩
+# 截断（实测会断成 "xxx@g" + "x.com"），此时退回 Cache：同一地址会以 URL 编码（%40）
+# 形式出现在 login_methods 等请求里。三级策略：
+#   1) IndexedDB 按频次取最高（正常情况一次命中）
+#   2) Cache 里只认 email= / email_address 标记后的地址（截断档案靠这级）
+#   3) 仍无结果时，Cache 按频次兜底
+# 不依赖 python3 / sqlite3。空档案或读不到时返回非 0 且无输出。
 profile_email() {
-  local name="$1" dir="$ROOT/$1/IndexedDB" e=""
-  [[ -d "$dir" ]] || return 1
-  local files=( "$dir"/**/*(N.) )
-  [[ ${#files[@]} -gt 0 ]] || return 1
-  e="$(strings -a "${files[@]}" 2>/dev/null \
-       | grep -A3 -m1 'email_address' \
-       | grep -aoE '[A-Za-z0-9._%+_-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}' \
-       | head -1)"
-  if [[ -z "$e" ]]; then
-    # 退化：只扫 claude.ai 的 IndexedDB，登录邮箱出现频次远高于其他地址；
-    # 不做域名黑名单过滤，避免误伤真实邮箱。
-    e="$(strings -a "${files[@]}" 2>/dev/null \
-         | grep -aoE '[A-Za-z0-9._%+_-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}' \
-         | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')"
-  fi
+  local root="$ROOT/$1" e=""
+  [[ -d "$root" ]] || return 1
+  e="$(_mail_scan "$root/IndexedDB")"
+  [[ -z "$e" ]] && e="$(_mail_marked "$root/Cache/Cache_Data")"
+  [[ -z "$e" ]] && e="$(_mail_scan "$root/Cache/Cache_Data" "$root/Local Storage" "$root/Session Storage")"
   [[ -n "$e" ]] && print -r -- "$e"
 }
 

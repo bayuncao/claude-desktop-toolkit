@@ -148,25 +148,68 @@ def pick_token(cache):
             best, best_score = tok, score
     return best
 
-EMAIL_RE = rb"[A-Za-z0-9._%+_-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}"
+EMAIL_RE = rb"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,10}"
+# 页面文案/厂商域名里的占位地址，不是登录邮箱
+BAD_EMAIL_RE = re.compile(
+    rb"@(?:example\.(?:com|org|net)|anthropic\.(?:com|ai)|claude\.ai|"
+    rb"sentry\.io|google\.com|gstatic\.com|w3\.org|schema\.org)$", re.I)
 
-def profile_email(d):
+def _scan(patterns, budget):
+    """按给定 glob 读入文件内容（单文件 <8MB，总量受 budget 限制），返回拼接后的二进制。"""
     blob = b""
-    for f in glob.glob(os.path.join(d, "IndexedDB", "**", "*"), recursive=True):
-        if os.path.isfile(f):
+    for pat in patterns:
+        for f in glob.glob(pat, recursive=True):
+            if not os.path.isfile(f):
+                continue
             try:
+                if os.path.getsize(f) > 8 * 1024 * 1024:
+                    continue
                 blob += open(f, "rb").read()
             except Exception:
                 pass
+            if len(blob) > budget:
+                return blob
+    return blob
+
+def _clean(cand):
+    return bool(cand) and not BAD_EMAIL_RE.search(cand)
+
+def _pick_frequent(blob):
     if not blob:
         return ""
-    m = re.search(rb"email_address.{0,300}", blob, re.S)
-    found = re.findall(EMAIL_RE, m.group(0)) if m else []
-    if not found:
-        found = re.findall(EMAIL_RE, blob)
+    found = [e for e in re.findall(EMAIL_RE, blob.replace(b"%40", b"@")) if _clean(e)]
     if not found:
         return ""
     return Counter(e.decode() for e in found).most_common(1)[0][0]
+
+MARKED_RE = re.compile(
+    rb"(?:email_address|emailAddress|email)[^A-Za-z0-9]{0,4}"
+    rb"([A-Za-z0-9._%+-]{2,}@[A-Za-z0-9.-]+\.[A-Za-z]{2,10})", re.I)
+
+def _pick_marked(blob):
+    """只取紧跟在 email= / email_address 标记后的地址：命中率最高、噪声最小。"""
+    if not blob:
+        return ""
+    for m in MARKED_RE.finditer(blob.replace(b"%40", b"@")):
+        cand = m.group(1)
+        if _clean(cand):
+            return cand.decode()
+    return ""
+
+def profile_email(d):
+    # account.email_address 在 IndexedDB 里可能被分块压缩截断（"xxx@g" + "x.com"），
+    # 此时退回 Cache：同一地址会以 %40 编码出现在 login_methods 等请求里。
+    # 三级策略：IndexedDB 频次 → Cache 标记 → Cache 频次。
+    email = _pick_frequent(_scan([os.path.join(d, "IndexedDB", "**", "*")], 24 * 1024 * 1024))
+    if email:
+        return email
+    cache_pats = [
+        os.path.join(d, "Cache", "Cache_Data", "*"),
+        os.path.join(d, "Local Storage", "**", "*"),
+        os.path.join(d, "Session Storage", "**", "*"),
+    ]
+    blob = _scan(cache_pats, 24 * 1024 * 1024)
+    return _pick_marked(blob) or _pick_frequent(blob)
 
 def fetch(token):
     cmd = ["curl", "-sS", "-m", "18"]
